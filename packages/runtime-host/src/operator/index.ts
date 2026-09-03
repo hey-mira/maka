@@ -95,6 +95,17 @@ export {
   type RuntimeHostSetupPhase,
 } from './setup-frame.js';
 export {
+  createRuntimeHostOperatorCommand,
+  createRuntimeHostLegacyPosixOperatorCommand,
+  decodeRuntimeHostOperatorCommand,
+  runtimeHostManagedOperatorCommand,
+  runtimeHostOperatorInvocation,
+  type RuntimeHostOperatorCommand,
+  type RuntimeHostOperatorPlatform,
+  type RuntimeHostLegacyPosixOperatorCommand,
+  type RuntimeHostNodeOperatorCommand,
+} from './operator-command.js';
+export {
   RUNTIME_HOST_SETUP_SOURCE_PACKAGE_INTEGRITY_ENV,
   compareProductReleaseVersions,
   isProductReleaseVersion,

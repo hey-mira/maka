@@ -57,6 +57,7 @@ export {
   decodeEnvironmentRuntimeHostProfile,
   decodePersistedRuntimeHostProfile,
   decodeRemoteRuntimeHostProfile,
+  migrateRuntimeHostProfileOperatorCommand,
   remoteRuntimeHostUnavailableError,
   runtimeHostProfileAccess,
   runtimeHostProfileTargetFingerprint,
@@ -87,6 +88,7 @@ export {
 export {
   RuntimeHostSshOperatorActivationError,
   activateRuntimeHostSshOperator,
+  runtimeHostSshOperatorRemoteCommand,
   type RuntimeHostSshOperatorActivationInput,
 } from './ssh-operator-activation.js';
 export {

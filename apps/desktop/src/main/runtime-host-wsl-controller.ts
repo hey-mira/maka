@@ -21,7 +21,6 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { Readable } from 'node:stream';
 import {
   normalizeRuntimeHostWslDistribution,
-  normalizeRuntimeHostWslOperatorPath,
   resolveSystemRuntimeHostWslExecutable,
   type RuntimeHostWslProcessFactory,
 } from '@maka/runtime-host/client';
@@ -32,6 +31,9 @@ import {
   RUNTIME_HOST_SERVICE_MANAGEMENT_FRAME_PREFIX,
   RUNTIME_HOST_SETUP_FRAME_PREFIX,
   RUNTIME_HOST_SETUP_SOURCE_PACKAGE_INTEGRITY_ENV,
+  decodeRuntimeHostOperatorCommand,
+  runtimeHostOperatorInvocation,
+  type RuntimeHostOperatorCommand,
   type RuntimeHostSetupFrame,
   type RuntimeHostSetupPhase,
   type RuntimeHostServiceManagementFrame,
@@ -51,7 +53,7 @@ type RuntimeHostManagementTerminalFrame = Exclude<
 
 export interface DesktopRuntimeHostWslManagementInput {
   readonly distribution: string;
-  readonly operatorPath: string;
+  readonly operator: RuntimeHostOperatorCommand;
   readonly action: 'status' | 'configure';
   readonly expectedTarget: {
     readonly serviceId: string;
@@ -83,12 +85,9 @@ export async function runDesktopRuntimeHostWslManagement(
 ): Promise<RuntimeHostManagementTerminalFrame> {
   input.signal?.throwIfAborted();
   const distribution = normalizeRuntimeHostWslDistribution(input.distribution);
-  const operatorPath = normalizeRuntimeHostWslOperatorPath(input.operatorPath);
-  const args = [
-    '--distribution',
-    distribution,
-    '--exec',
-    operatorPath,
+  const operator = decodeRuntimeHostOperatorCommand(input.operator);
+  if (operator.platform !== 'posix') throw new Error('WSL Runtime Host operator must target POSIX');
+  const invocation = runtimeHostOperatorInvocation(operator, [
     input.action,
     '--framed',
     ...(input.projectDirectoryRoots === undefined
@@ -112,6 +111,13 @@ export async function runDesktopRuntimeHostWslManagement(
     ...(input.expectedTarget.deploymentId
       ? ['--expected-deployment-id', input.expectedTarget.deploymentId]
       : []),
+  ]);
+  const args = [
+    '--distribution',
+    distribution,
+    '--exec',
+    invocation.executable,
+    ...invocation.args,
   ];
   const environment = passEnvironmentToWsl(
     process.env,

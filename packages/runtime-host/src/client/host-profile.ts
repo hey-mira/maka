@@ -20,7 +20,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { watch } from 'node:fs';
 import { chmod, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
-import { dirname, join, posix } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createFileCredentialStore, type CredentialStore } from '@maka/storage/credential-store';
 import { withFileUpdateLock } from '@maka/storage/file-update-lock';
 import {
@@ -31,6 +31,11 @@ import {
   requireClientInstanceId,
   requireHostRootId,
 } from '../protocol/index.js';
+import {
+  createRuntimeHostLegacyPosixOperatorCommand,
+  decodeRuntimeHostOperatorCommand,
+  type RuntimeHostOperatorCommand,
+} from '../operator/operator-command.js';
 import type { RuntimeHostProfileOfKind } from '../profile-kind.js';
 import {
   connectRemoteRuntimeHost,
@@ -64,11 +69,10 @@ import { waitForRuntimeHostReady } from './wait-for-ready.js';
 import {
   connectRuntimeHostWslEnvironment,
   normalizeRuntimeHostWslDistribution,
-  normalizeRuntimeHostWslOperatorPath,
   type RuntimeHostWslProcessFactory,
 } from './wsl-environment.js';
 
-const PROFILE_SCHEMA_VERSION = 4;
+const PROFILE_SCHEMA_VERSION = 5;
 const CLIENT_PROFILE_DOCUMENT_NAME = 'runtime-host-profiles.json';
 const PROFILE_DOCUMENT_MAX_BYTES = 64 * 1024;
 const PROFILE_COUNT_MAX = 32;
@@ -101,7 +105,7 @@ export interface EnvironmentRuntimeHostProfile extends RuntimeHostProfileOfKind<
     readonly distribution: string;
   };
   readonly rootId: string;
-  readonly operatorPath: string;
+  readonly operator: RuntimeHostOperatorCommand;
 }
 
 export interface RemoteRuntimeHostProfile extends RuntimeHostProfileOfKind<'remote'> {
@@ -143,7 +147,7 @@ export type RuntimeHostRemoteTransport =
       readonly sshPort?: number;
       readonly activation: {
         readonly kind: 'ssh_operator';
-        readonly operatorPath: string;
+        readonly operator: RuntimeHostOperatorCommand;
       };
       readonly remotePort?: never;
       readonly websocketPath?: never;
@@ -408,7 +412,7 @@ export async function connectRuntimeHostProfile(
     return (overrides.connectWsl ?? connectRuntimeHostWslEnvironment)(
       {
         distribution: input.profile.provider.distribution,
-        operatorPath: input.profile.operatorPath,
+        operator: input.profile.operator,
         rootId: input.profile.rootId,
         clientInstanceId: input.clientInstanceId,
         ...(input.signal === undefined ? {} : { signal: input.signal }),
@@ -490,7 +494,7 @@ export async function connectRemoteRuntimeHostProfile(
         ? await (overrides.activateSshOperator ?? activateRuntimeHostSshOperator)({
             destination: transport.destination,
             ...(transport.sshPort === undefined ? {} : { sshPort: transport.sshPort }),
-            operatorPath: transport.activation.operatorPath,
+            operator: transport.activation.operator,
             rootId: input.profile.rootId,
             interaction: input.sshInteraction ?? 'batch',
             ...(input.signal === undefined ? {} : { signal: input.signal }),
@@ -793,6 +797,7 @@ export function decodeRuntimeHostProfileDocument(value: unknown): RuntimeHostPro
     record.schemaVersion !== 1 &&
     record.schemaVersion !== 2 &&
     record.schemaVersion !== 3 &&
+    record.schemaVersion !== 4 &&
     record.schemaVersion !== PROFILE_SCHEMA_VERSION
   ) {
     throw new Error('Runtime Host profile document has an unsupported schema');
@@ -800,7 +805,13 @@ export function decodeRuntimeHostProfileDocument(value: unknown): RuntimeHostPro
   if (!Array.isArray(record.profiles) || record.profiles.length > PROFILE_COUNT_MAX) {
     throw new Error('Runtime Host profile document has an invalid profile list');
   }
-  const profiles = record.profiles.map(decodePersistedRuntimeHostProfile);
+  const profiles = record.profiles.map((profile) =>
+    decodePersistedRuntimeHostProfile(
+      (record.schemaVersion as number) < PROFILE_SCHEMA_VERSION
+        ? migrateRuntimeHostProfileOperatorCommand(profile)
+        : profile,
+    ),
+  );
   if (
     record.schemaVersion === 1 &&
     profiles.some(
@@ -834,6 +845,52 @@ export function decodeRuntimeHostProfileDocument(value: unknown): RuntimeHostPro
     schemaVersion: PROFILE_SCHEMA_VERSION,
     profiles: Object.freeze(profiles),
   });
+}
+
+export function migrateRuntimeHostProfileOperatorCommand(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const profile = value as Record<string, unknown>;
+  if (
+    profile.kind === 'environment' &&
+    typeof profile.operatorPath === 'string' &&
+    !Object.hasOwn(profile, 'operator')
+  ) {
+    const { operatorPath, ...rest } = profile;
+    return {
+      ...rest,
+      operator: createRuntimeHostLegacyPosixOperatorCommand(operatorPath),
+    };
+  }
+  if (profile.kind !== 'remote' || !profile.transport || typeof profile.transport !== 'object') {
+    return value;
+  }
+  const transport = profile.transport as Record<string, unknown>;
+  if (
+    transport.kind !== 'ssh' ||
+    !transport.activation ||
+    typeof transport.activation !== 'object'
+  ) {
+    return value;
+  }
+  const activation = transport.activation as Record<string, unknown>;
+  if (
+    activation.kind !== 'ssh_operator' ||
+    typeof activation.operatorPath !== 'string' ||
+    Object.hasOwn(activation, 'operator')
+  ) {
+    return value;
+  }
+  const { operatorPath, ...activationRest } = activation;
+  return {
+    ...profile,
+    transport: {
+      ...transport,
+      activation: {
+        ...activationRest,
+        operator: createRuntimeHostLegacyPosixOperatorCommand(operatorPath),
+      },
+    },
+  };
 }
 
 class FileRuntimeHostProfileCatalog implements RuntimeHostProfileCatalog {
@@ -1213,7 +1270,7 @@ export function decodeEnvironmentRuntimeHostProfile(value: unknown): Environment
     'kind',
     'provider',
     'rootId',
-    'operatorPath',
+    'operator',
   ]);
   if (record.kind !== 'environment') {
     throw new Error('Runtime Host environment profile kind must be environment');
@@ -1234,9 +1291,7 @@ export function decodeEnvironmentRuntimeHostProfile(value: unknown): Environment
       ),
     }),
     rootId: requireHostRootId(record.rootId),
-    operatorPath: normalizeRuntimeHostWslOperatorPath(
-      requireString(record.operatorPath, 'WSL operator path'),
-    ),
+    operator: decodeRuntimeHostOperatorCommand(record.operator),
   });
 }
 
@@ -1317,17 +1372,17 @@ export function decodeRuntimeHostRemoteTransport(value: unknown): RuntimeHostRem
     if (activated) {
       const activation = requireExactRecord(record.activation, 'Runtime Host SSH activation', [
         'kind',
-        'operatorPath',
+        'operator',
       ]);
       if (activation.kind !== 'ssh_operator') {
         throw new Error('Runtime Host SSH activation kind is invalid');
       }
-      const operatorPath = requireOperatorPath(activation.operatorPath);
+      const operator = decodeRuntimeHostOperatorCommand(activation.operator);
       return Object.freeze({
         kind: 'ssh',
         destination,
         ...(sshPort === undefined ? {} : { sshPort }),
-        activation: Object.freeze({ kind: 'ssh_operator', operatorPath }),
+        activation: Object.freeze({ kind: 'ssh_operator', operator }),
       });
     }
     const remotePort = requirePort(record.remotePort, 'Runtime Host SSH remote port');
@@ -1494,7 +1549,7 @@ function profileTargetBinding(profile: PersistedRuntimeHostProfile): string {
     'environment',
     normalized.provider.kind,
     normalized.provider.distribution,
-    normalized.operatorPath,
+    operatorTargetBinding(normalized.operator),
     normalized.rootId,
   ].join('\0');
 }
@@ -1518,11 +1573,17 @@ function transportCredentialBinding(transport: RuntimeHostRemoteTransport): stri
       return `${transport.url}\0${transport.acknowledgement}`;
     case 'ssh':
       return transport.activation
-        ? `${transport.destination}\0${transport.sshPort ?? ''}\0activate\0${transport.activation.operatorPath}`
+        ? `${transport.destination}\0${transport.sshPort ?? ''}\0activate\0${operatorTargetBinding(transport.activation.operator)}`
         : `${transport.destination}\0${transport.sshPort ?? ''}\0${transport.remotePort}\0${transport.websocketPath}`;
     case 'libp2p-direct':
       return transport.reachability.lease.peerId;
   }
+}
+
+function operatorTargetBinding(operator: RuntimeHostOperatorCommand): string {
+  return operator.kind === 'legacy_posix_executable'
+    ? operator.executablePath
+    : JSON.stringify(operator);
 }
 
 function requireBoundedToken(value: unknown, label: string, maxBytes: number): string {
@@ -1619,18 +1680,6 @@ function requireWebSocketPath(value: unknown): string {
   return path;
 }
 
-function requireOperatorPath(value: unknown): string {
-  const path = requireString(value, 'Runtime Host SSH operator path');
-  if (
-    !posix.isAbsolute(path) ||
-    Buffer.byteLength(path, 'utf8') > 4_096 ||
-    /[\u0000-\u001f\u007f]/u.test(path)
-  ) {
-    throw new Error('Runtime Host SSH operator path must be an absolute POSIX path');
-  }
-  return posix.normalize(path);
-}
-
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error(`${label} must be an object`);
@@ -1667,20 +1716,18 @@ async function writeProfileDocument(
   document: RuntimeHostProfileDocument,
 ): Promise<void> {
   const schemaVersion = document.profiles.some(
-    (profile) => profile.kind === 'remote' && profile.transport.kind === 'libp2p-direct',
+    (profile) =>
+      profile.kind === 'environment' ||
+      (profile.kind === 'remote' &&
+        (profile.transport.kind === 'libp2p-direct' ||
+          (profile.transport.kind === 'ssh' && profile.transport.activation !== undefined))),
   )
     ? PROFILE_SCHEMA_VERSION
     : document.profiles.some(
           (profile) => profile.kind === 'remote' && profile.access === 'session_guest',
         )
       ? 3
-      : document.profiles.some(
-            (profile) =>
-              profile.kind === 'environment' ||
-              (profile.transport.kind === 'ssh' && profile.transport.activation !== undefined),
-          )
-        ? 2
-        : 1;
+      : 1;
   const encoded = `${JSON.stringify({ ...document, schemaVersion }, null, 2)}\n`;
   if (Buffer.byteLength(encoded, 'utf8') > PROFILE_DOCUMENT_MAX_BYTES) {
     throw new Error('Runtime Host profile document exceeds its size limit');

@@ -21,6 +21,7 @@ import { randomUUID } from 'node:crypto';
 import type { IpcMain } from 'electron';
 import {
   parseRuntimeHostSetupEndpoint,
+  type RuntimeHostOperatorCommand,
   type RuntimeHostSetupPhase,
 } from '@maka/runtime-host/operator';
 import type {
@@ -58,7 +59,7 @@ export function createDesktopRuntimeHostOnboarding(input: {
     readonly rootPath: string;
     readonly serviceId: string;
     readonly deploymentId: string;
-    readonly operatorPath: string;
+    readonly operator: RuntimeHostOperatorCommand;
     readonly endpoint: string;
     readonly credential: string;
   }>;
@@ -71,12 +72,12 @@ export function createDesktopRuntimeHostOnboarding(input: {
     readonly rootPath: string;
     readonly serviceId: string;
     readonly deploymentId: string;
-    readonly operatorPath: string;
+    readonly operator: RuntimeHostOperatorCommand;
   }>;
   readonly listWslDistributions: () => Promise<readonly string[]>;
   readonly send: (snapshot: DesktopRuntimeHostOnboardingSnapshot) => void;
   readonly setupPackageMode: 'published' | 'development';
-  readonly resolveSshDevelopmentPeerTarget: (input: {
+  readonly resolveSshPeerTarget: (input: {
     readonly destination: string;
     readonly sshPort?: number;
     readonly signal?: AbortSignal;
@@ -134,10 +135,11 @@ export function createDesktopRuntimeHostOnboarding(input: {
         const setupPackage = await input.resolveSetupPackage('none', signal);
         return await runWsl(request, setupPackage, signal);
       }
-      const peerTarget = input.setupPackageMode === 'development'
-        ? await resolveSshDevelopmentPeerTarget(request, signal)
-        : 'none';
-      const setupPackage = await input.resolveSetupPackage(peerTarget, signal);
+      const peerTarget = await resolveSshPeerTarget(request, signal);
+      const setupPackage = await input.resolveSetupPackage(
+        input.setupPackageMode === 'development' ? peerTarget : 'none',
+        signal,
+      );
       const lifecycle = setupPackage.kind === 'npm' ? 'on_demand' : 'supervised';
       signal.throwIfAborted();
       publish({ kind: 'running', phase: 'connecting_ssh' });
@@ -156,6 +158,7 @@ export function createDesktopRuntimeHostOnboarding(input: {
           destination: request.destination,
           ...(request.sshPort === undefined ? {} : { sshPort: request.sshPort }),
           setupPackage,
+          remotePlatform: peerTarget === 'win32-x64' ? 'win32' : 'posix',
           lifecycle,
           principalId: `desktop:${input.clientInstanceId}`,
           ...(request.projectDirectoryRoots
@@ -191,7 +194,7 @@ export function createDesktopRuntimeHostOnboarding(input: {
               ? {
                   activation: {
                     kind: 'ssh_operator' as const,
-                    operatorPath: complete.operatorPath,
+                    operator: complete.operator,
                   },
                 }
               : {
@@ -209,7 +212,7 @@ export function createDesktopRuntimeHostOnboarding(input: {
           },
           control: {
             kind: 'ssh_operator',
-            operatorPath: complete.operatorPath,
+            operator: complete.operator,
           },
         },
       });
@@ -226,12 +229,12 @@ export function createDesktopRuntimeHostOnboarding(input: {
     }
   };
 
-  const resolveSshDevelopmentPeerTarget = async (
+  const resolveSshPeerTarget = async (
     request: Extract<DesktopRuntimeHostOnboardingInput, { readonly kind: 'ssh' }>,
     signal: AbortSignal,
   ): Promise<Exclude<DesktopRuntimeHostDevelopmentPeerTarget, 'none'>> => {
     publish({ kind: 'running', phase: 'connecting_ssh' });
-    const target = await input.resolveSshDevelopmentPeerTarget({
+    const target = await input.resolveSshPeerTarget({
       destination: request.destination,
       ...(request.sshPort === undefined ? {} : { sshPort: request.sshPort }),
       signal,
@@ -276,7 +279,7 @@ export function createDesktopRuntimeHostOnboarding(input: {
       kind: 'environment' as const,
       provider: { kind: 'wsl' as const, distribution: request.distribution },
       rootId: complete.rootId,
-      operatorPath: complete.operatorPath,
+      operator: complete.operator,
     };
     const connected = await input.profiles.addManagedEnvironmentAndEnable({
       profile,

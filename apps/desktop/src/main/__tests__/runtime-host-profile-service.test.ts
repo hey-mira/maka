@@ -56,6 +56,12 @@ import {
 } from "../runtime-host-profile-service.js";
 
 const ROOT_ID = "a".repeat(64);
+const OPERATOR = {
+  kind: "node" as const,
+  platform: "posix" as const,
+  nodePath: "/usr/bin/node",
+  modulePath: "/home/operator/.local/share/Maka/runtime-host-services/operator.mjs",
+};
 const PROFILE = {
   id: "office",
   name: "Office",
@@ -81,7 +87,7 @@ const MANAGED_SERVICE = {
   },
   control: {
     kind: "ssh_operator" as const,
-    operatorPath: "/home/operator/.local/share/maka/operator",
+    operator: OPERATOR,
   },
 };
 const READY_PROFILE = {
@@ -289,7 +295,7 @@ test("reuses the existing WSL profile when the same managed Host is added again"
     kind: "environment" as const,
     provider: { kind: "wsl" as const, distribution: "Ubuntu-24.04" },
     rootId: ROOT_ID,
-    operatorPath: "/home/operator/.local/share/Maka/runtime-host-services/operator",
+    operator: OPERATOR,
   };
   await catalog.create(existing);
   const enabled: string[] = [];

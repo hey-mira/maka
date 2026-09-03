@@ -2549,7 +2549,12 @@ describe('managed Runtime Host service', () => {
       version,
       root: deploymentRoot,
       cliPath,
-      operatorPath: join(deploymentRoot, 'operator'),
+      operator: {
+        kind: 'node' as const,
+        platform: 'posix' as const,
+        nodePath: '/usr/bin/node',
+        modulePath: join(deploymentRoot, 'operator.mjs'),
+      },
       activate: async () => {
         assert.equal(insideLifecycle, true);
         order.push('activate');
@@ -2611,7 +2616,7 @@ describe('managed Runtime Host service', () => {
           ),
         ),
       runOperator: async (
-        _operatorPath: string,
+        _operator: import('@maka/runtime-host/operator').RuntimeHostOperatorCommand,
         args: readonly string[],
         invocation?: {
           readonly inheritedFds?: readonly number[];

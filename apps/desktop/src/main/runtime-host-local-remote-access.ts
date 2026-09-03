@@ -20,13 +20,18 @@
 import { randomUUID } from 'node:crypto';
 import { open, readFile, rename, rm } from 'node:fs/promises';
 import { hostname } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { IpcMain } from 'electron';
 import {
   encodeRuntimeHostOwnerConnectionCode,
   issueRuntimeHostOwnerConnectionCode,
 } from '@maka/runtime-host/client';
-import { resolveRuntimeHostManagedDeploymentAuthority } from '@maka/runtime-host/operator';
+import {
+  runtimeHostManagedOperatorCommand,
+  decodeRuntimeHostOperatorCommand,
+  resolveRuntimeHostManagedDeploymentAuthority,
+  type RuntimeHostOperatorCommand,
+} from '@maka/runtime-host/operator';
 import type { HostPeerEndpoint, HostRegistration } from '@maka/runtime-host/protocol';
 import type {
   DesktopLocalRuntimeHostRemoteAccessEnableResult,
@@ -53,25 +58,15 @@ const ADDRESS_MAX_COUNT = 16;
 const LOCAL_REMOTE_ACCESS_PRINCIPAL_ID = 'desktop-owner:local-runtime-host-sharing';
 
 interface LocalServiceTarget extends DesktopRuntimeHostLocalServiceTarget {
-  readonly schemaVersion: 1;
-  readonly operatorPath: string;
+  readonly schemaVersion: 2;
+  readonly operator: RuntimeHostOperatorCommand;
   readonly deploymentId: string;
 }
 
 interface LocalServiceSetupPending {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   /** Persisted only after the Desktop-owned Host has retired. */
   readonly state: 'setupPending';
-  readonly rootPath: string;
-  readonly rootId: string;
-  readonly coordinationRelays: readonly string[];
-  readonly allowInterruptActiveTasks: boolean;
-}
-
-/** Schema-v1 setup intent written by Desktop releases before ownership was established. */
-interface LocalServiceLegacyHandoff {
-  readonly schemaVersion: 1;
-  readonly state: 'handoff';
   readonly rootPath: string;
   readonly rootId: string;
   readonly coordinationRelays: readonly string[];
@@ -92,7 +87,7 @@ type LocalManagedDeploymentAuthority =
 
 export interface DesktopRuntimeHostLocalManagementTarget
   extends DesktopRuntimeHostLocalServiceTarget {
-  readonly operatorPath: string;
+  readonly operator: RuntimeHostOperatorCommand;
   readonly deploymentId: string;
 }
 
@@ -146,7 +141,6 @@ interface LocalServiceUninstalling extends LocalServiceTarget {
 }
 
 type LocalServiceLifecycle =
-  | LocalServiceLegacyHandoff
   | LocalServiceSetupPending
   | LocalServiceManaged
   | LocalServicePeerChanging
@@ -201,9 +195,12 @@ export function createDesktopLocalRuntimeHostRemoteAccess(input: {
         lifecycleMode: authority.record.lifecycle.mode,
         target: requireServiceTarget(
           {
-            schemaVersion: 1,
+            schemaVersion: 2,
             serviceId: authority.record.root.id,
-            operatorPath: join(authority.record.deploymentRoot, 'operator'),
+            operator: runtimeHostManagedOperatorCommand(
+              authority.record,
+              process.platform === 'win32' ? 'win32' : 'posix',
+            ),
             rootPath: authority.record.root.path,
             rootId: authority.record.root.id,
             deploymentId: authority.record.deploymentId,
@@ -244,7 +241,7 @@ export function createDesktopLocalRuntimeHostRemoteAccess(input: {
           return {
             state: 'unavailable',
             message:
-              lifecycle.state === 'setupPending' || lifecycle.state === 'handoff'
+              lifecycle.state === 'setupPending'
                 ? 'Local Runtime Host setup is being recovered'
                 : lifecycle.state === 'peerChanging'
                   ? 'Local Runtime Host remote access is being recovered'
@@ -285,14 +282,6 @@ export function createDesktopLocalRuntimeHostRemoteAccess(input: {
         if (recovered.kind === 'active_tasks') return recovered;
         lifecycle = managedLifecycle(lifecycle);
       }
-      if (lifecycle?.state === 'handoff') {
-        const recovered = await recoverLegacyHandoff(lifecycle);
-        if (recovered.kind === 'active_tasks') return recovered;
-        if (recovered.kind === 'external') {
-          throw new Error('The Local Runtime Host is already managed outside this Desktop');
-        }
-        lifecycle = recovered.managed;
-      }
       if (lifecycle?.state === 'setupPending') {
         const committed = await adoptCommittedSetup(lifecycle);
         if (committed.kind === 'managed') {
@@ -329,7 +318,7 @@ export function createDesktopLocalRuntimeHostRemoteAccess(input: {
       }
 
       const setup: LocalServiceSetupPending = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         state: 'setupPending',
         rootPath: input.rootPath,
         rootId: input.rootId,
@@ -427,9 +416,9 @@ export function createDesktopLocalRuntimeHostRemoteAccess(input: {
       }
       target = requireServiceTarget(
         {
-          schemaVersion: 1,
+          schemaVersion: 2,
           serviceId: complete.serviceId,
-          operatorPath: complete.operatorPath,
+          operator: complete.operator,
           rootPath: complete.rootPath,
           rootId: complete.rootId,
           deploymentId: complete.deploymentId,
@@ -452,51 +441,6 @@ export function createDesktopLocalRuntimeHostRemoteAccess(input: {
         );
       }
       throw error;
-    }
-  };
-
-  const recoverLegacyHandoff = async (
-    legacy: LocalServiceLegacyHandoff,
-  ): Promise<
-    | { readonly kind: 'active_tasks' }
-    | { readonly kind: 'external' }
-    | { readonly kind: 'complete'; readonly managed: LocalServiceManaged }
-  > => {
-    const pending = pendingSetup(legacy);
-    const authority = await adoptCommittedSetup(pending);
-    if (authority.kind === 'managed') {
-      return { kind: 'complete', managed: authority.managed };
-    }
-    if (authority.kind === 'transition') {
-      await writeDocument(lifecyclePath, pending);
-      return finishSetup(pending, 'recovery');
-    }
-
-    const manager = requireManager(input.manager);
-    const retirement = await manager.retireOwnedLocalHost(
-      legacy.allowInterruptActiveTasks ? 'interrupt_active_work' : 'refuse_active_work',
-    );
-    if (retirement.kind === 'active_tasks') return { kind: 'active_tasks' };
-    if (retirement.kind === 'not_owned') {
-      const raced = await adoptCommittedSetup(pending);
-      if (raced.kind === 'managed') {
-        return { kind: 'complete', managed: raced.managed };
-      }
-      if (raced.kind === 'absent') {
-        await removeDocument(lifecyclePath);
-        return { kind: 'external' };
-      }
-    }
-
-    try {
-      await writeDocument(lifecyclePath, pending);
-      const setupPackage = await input.resolveSetupPackage(closing.signal);
-      const reconcile = () => reconcileSetup(pending, setupPackage);
-      return retirement.kind === 'not_owned'
-        ? await manager.runManagedLocalHostChange(reconcile)
-        : await reconcile();
-    } finally {
-      if (retirement.kind === 'retired') retirement.resume();
     }
   };
 
@@ -581,7 +525,7 @@ export function createDesktopLocalRuntimeHostRemoteAccess(input: {
       }
       const managed = requireManagementTarget(lifecycle);
       const intent: LocalServiceUninstalling = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         ...managed,
         state: 'uninstalling',
         allowInterruptActiveTasks,
@@ -599,7 +543,7 @@ export function createDesktopLocalRuntimeHostRemoteAccess(input: {
   > => {
     const change = () =>
       input.operator.runPeer({
-        operatorPath: intent.operatorPath,
+        operator: intent.operator,
         action: intent.peerEnabled ? 'enable' : 'disable',
         target: intent,
         coordinationRelays: intent.coordinationRelays,
@@ -632,7 +576,7 @@ export function createDesktopLocalRuntimeHostRemoteAccess(input: {
       if (authority) {
         const change = () =>
           input.operator.runService({
-            operatorPath: intent.operatorPath,
+            operator: intent.operator,
             action: 'uninstall',
             target: intent,
             allowInterruptActiveTasks: intent.allowInterruptActiveTasks,
@@ -654,12 +598,12 @@ export function createDesktopLocalRuntimeHostRemoteAccess(input: {
       await writeDocument(lifecyclePath, intent);
     }
     await input.operator.cleanupManagedDeployment({
-      operatorPath: intent.operatorPath,
+      operator: intent.operator,
       target: intent,
       signal,
     });
     await input.operator.cleanupManagedDeployment({
-      operatorPath: intent.operatorPath,
+      operator: intent.operator,
       target: intent,
       finalize: true,
       signal,
@@ -800,7 +744,7 @@ export function createDesktopLocalRuntimeHostRemoteAccess(input: {
 
         if (frame.update.kind === 'already_current') {
           const restarted = await input.operator.runService({
-            operatorPath: lifecycle.operatorPath,
+            operator: lifecycle.operator,
             action: 'restart',
             target: lifecycle,
             ...(options.allowInterruptActiveTasks
@@ -842,18 +786,16 @@ export function createDesktopLocalRuntimeHostRemoteAccess(input: {
           return true;
         });
       }
-      if (observed?.state !== 'setupPending' && observed?.state !== 'handoff') return false;
+      if (observed?.state !== 'setupPending') return false;
       return serialize(async () => {
         operationSignal.throwIfAborted();
         const pending = await readLifecycle(lifecyclePath, input.rootPath, input.rootId);
-        if (pending?.state !== 'setupPending' && pending?.state !== 'handoff') return false;
-        const committed = pendingSetup(pending);
-        const authority = await adoptCommittedSetup(committed);
+        if (pending?.state !== 'setupPending') return false;
+        const authority = await adoptCommittedSetup(pending);
         if (authority.kind === 'absent') return false;
         if (authority.kind === 'managed') return true;
-        if (pending.state === 'handoff') await writeDocument(lifecyclePath, committed);
         const setupPackage = await input.resolveSetupPackage(operationSignal);
-        await reconcileSetup(committed, setupPackage, operationSignal);
+        await reconcileSetup(pending, setupPackage, operationSignal);
         return true;
       });
     },
@@ -872,12 +814,11 @@ export function createDesktopLocalRuntimeHostRemoteAccess(input: {
           }
           return;
         }
-        if (lifecycle.state === 'handoff' || lifecycle.state === 'setupPending') {
-          const committed = await adoptCommittedSetup(pendingSetup(lifecycle));
+        if (lifecycle.state === 'setupPending') {
+          const committed = await adoptCommittedSetup(lifecycle);
           if (committed.kind === 'managed') return;
           if (!supported(input.directPeerAvailable)) return;
-          if (lifecycle.state === 'handoff') await recoverLegacyHandoff(lifecycle);
-          else await finishSetup(lifecycle, 'recovery');
+          await finishSetup(lifecycle, 'recovery');
           return;
         }
       }),
@@ -929,7 +870,7 @@ async function readPeer(
   receipt: LocalServiceTarget,
 ): Promise<LocalPeerDescriptor | undefined> {
   const response = await operator.runPeer({
-    operatorPath: receipt.operatorPath,
+    operator: receipt.operator,
     action: 'status',
     target: receipt,
   });
@@ -997,7 +938,7 @@ async function hasSharedAccess(
   target: LocalServiceTarget,
 ): Promise<boolean> {
   const response = await operator.runAccess({
-    operatorPath: target.operatorPath,
+    operator: target.operator,
     target,
   });
   if (response.kind === 'error') throw new Error(response.error.message);
@@ -1039,25 +980,23 @@ function hostName(): string {
 function requireServiceTarget(value: unknown, rootPath: string): LocalServiceTarget {
   if (
     !isRecord(value) ||
-    value.schemaVersion !== 1 ||
+    value.schemaVersion !== 2 ||
     typeof value.serviceId !== 'string' ||
     !SERVICE_ID_PATTERN.test(value.serviceId) ||
     typeof value.rootId !== 'string' ||
     !ROOT_ID_PATTERN.test(value.rootId) ||
     typeof value.deploymentId !== 'string' ||
     !DEPLOYMENT_ID_PATTERN.test(value.deploymentId) ||
-    value.rootPath !== rootPath ||
-    typeof value.operatorPath !== 'string' ||
-    !isAbsolute(value.operatorPath)
+    value.rootPath !== rootPath
   ) {
     throw new Error('Local Runtime Host service receipt is invalid');
   }
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     serviceId: value.serviceId,
     rootPath,
     rootId: value.rootId,
-    operatorPath: value.operatorPath,
+    operator: decodeRuntimeHostOperatorCommand(value.operator),
     deploymentId: value.deploymentId,
   };
 }
@@ -1078,25 +1017,12 @@ function requireManagementTarget(
   return lifecycle;
 }
 
-function pendingSetup(
-  intent: LocalServiceSetupPending | LocalServiceLegacyHandoff,
-): LocalServiceSetupPending {
-  return {
-    schemaVersion: 1,
-    state: 'setupPending',
-    rootPath: intent.rootPath,
-    rootId: intent.rootId,
-    coordinationRelays: intent.coordinationRelays,
-    allowInterruptActiveTasks: intent.allowInterruptActiveTasks,
-  };
-}
-
 function managedLifecycle(intent: LocalServiceTarget): LocalServiceManaged {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     state: 'managed',
     serviceId: intent.serviceId,
-    operatorPath: intent.operatorPath,
+    operator: intent.operator,
     rootPath: intent.rootPath,
     rootId: intent.rootId,
     deploymentId: intent.deploymentId,
@@ -1107,7 +1033,7 @@ function hasManagedServiceTarget(lifecycle: LocalServiceLifecycle): lifecycle is
   | LocalServiceManaged
   | LocalServicePeerChanging
   | LocalServiceUninstalling {
-  return lifecycle.state !== 'handoff' && lifecycle.state !== 'setupPending';
+  return lifecycle.state !== 'setupPending';
 }
 
 async function readLifecycle(
@@ -1124,13 +1050,13 @@ async function readLifecycle(
   }
   if (
     !isRecord(value) ||
-    value.schemaVersion !== 1 ||
+    value.schemaVersion !== 2 ||
     value.rootPath !== rootPath ||
     value.rootId !== rootId
   ) {
     throw new Error('Local Runtime Host service lifecycle is invalid');
   }
-  if (value.state === 'setupPending' || value.state === 'handoff') {
+  if (value.state === 'setupPending') {
     assertExactKeys(value, [
       'schemaVersion',
       'state',
@@ -1145,7 +1071,7 @@ async function readLifecycle(
       throw new Error('Local Runtime Host setup intent is invalid');
     }
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       state: value.state,
       rootPath,
       rootId,
@@ -1158,7 +1084,7 @@ async function readLifecycle(
     'schemaVersion',
     'state',
     'serviceId',
-    'operatorPath',
+    'operator',
     'rootPath',
     'rootId',
     'deploymentId',
@@ -1256,7 +1182,7 @@ async function uninstallExactService(
   receipt: LocalServiceTarget,
 ): Promise<void> {
   const response = await operator.runService({
-    operatorPath: receipt.operatorPath,
+    operator: receipt.operator,
     action: 'uninstall',
     target: receipt,
   });

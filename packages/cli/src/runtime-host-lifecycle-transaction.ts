@@ -859,7 +859,12 @@ export function runtimeHostReconciliationTriggerDefinition(
 ): RuntimeHostProviderDefinition {
   const canonical = decodeRuntimeHostManagedDeploymentConfig(config);
   return {
-    command: [join(canonical.deploymentRoot, 'operator'), 'reconcile-update', '--framed'],
+    command: [
+      canonical.launch.nodePath,
+      join(canonical.deploymentRoot, 'operator.mjs'),
+      'reconcile-update',
+      '--framed',
+    ],
   };
 }
 

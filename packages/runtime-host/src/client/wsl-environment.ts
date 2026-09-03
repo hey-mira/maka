@@ -19,6 +19,11 @@
 
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import {
+  decodeRuntimeHostOperatorCommand,
+  runtimeHostOperatorInvocation,
+  type RuntimeHostOperatorCommand,
+} from '../operator/operator-command.js';
+import {
   INTERACTIVE_RUNTIME_HOST_COMPOSITION_ID,
   RUNTIME_HOST_PROTOCOL_VERSION,
   requireHostRootId,
@@ -63,7 +68,7 @@ export {
 
 export interface RuntimeHostWslEnvironmentInput {
   readonly distribution: string;
-  readonly operatorPath: string;
+  readonly operator: RuntimeHostOperatorCommand;
   readonly rootId: string;
   readonly clientInstanceId: string;
   readonly signal?: AbortSignal;
@@ -81,19 +86,25 @@ export async function connectRuntimeHostWslEnvironment(
 ): Promise<RuntimeHostConnection> {
   input.signal?.throwIfAborted();
   const distribution = normalizeRuntimeHostWslDistribution(input.distribution);
-  const operatorPath = normalizeRuntimeHostWslOperatorPath(input.operatorPath);
+  const operator = decodeRuntimeHostOperatorCommand(input.operator);
+  if (operator.platform !== 'posix') {
+    throw new Error('WSL Runtime Host operator must target POSIX');
+  }
   const rootId = requireHostRootId(input.rootId);
   const processFactory = overrides.processFactory ?? spawnRuntimeHostWslProcess;
-  const child = processFactory(overrides.wslExecutable ?? resolveSystemRuntimeHostWslExecutable(), [
-    '--distribution',
-    distribution,
-    '--exec',
-    operatorPath,
+  const invocation = runtimeHostOperatorInvocation(operator, [
     'connect',
     '--framed',
     '--root-id',
     rootId,
     '--repair-root-after-remount',
+  ]);
+  const child = processFactory(overrides.wslExecutable ?? resolveSystemRuntimeHostWslExecutable(), [
+    '--distribution',
+    distribution,
+    '--exec',
+    invocation.executable,
+    ...invocation.args,
   ]);
   const resource = new WslProcessByteStream(child);
   const transport = new FramedByteStreamTransport(resource);
