@@ -242,7 +242,7 @@ const SERVICE_SUMMARY_SCHEMA = z
         mode: z.enum(['on_demand', 'supervised']),
         availability: z.enum(['activation', 'session', 'environment', 'machine']),
         provider: z
-          .enum(['systemd_user', 'launch_agent', 'openrc_user', 'openrc_system'])
+          .enum(['systemd_user', 'launch_agent', 'openrc_user', 'openrc_system', 'windows_task'])
           .optional(),
       })
       .strict()
@@ -251,7 +251,12 @@ const SERVICE_SUMMARY_SCHEMA = z
       .object({
         trigger: z.enum(['manual', 'activation', 'scheduled']),
         provider: z
-          .enum(['systemd_timer', 'launch_agent_timer', 'openrc_supervised_loop'])
+          .enum([
+            'systemd_timer',
+            'launch_agent_timer',
+            'openrc_supervised_loop',
+            'windows_task_timer',
+          ])
           .optional(),
       })
       .strict()

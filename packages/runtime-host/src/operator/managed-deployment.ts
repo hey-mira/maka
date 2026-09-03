@@ -63,11 +63,18 @@ const boundedText = (maximumBytes: number) =>
 const absolutePathSchema = boundedText(4_096).refine(isAbsolute);
 const deploymentIdSchema = z.string().regex(UUID_PATTERN);
 const configRevisionSchema = z.number().int().positive().safe();
-const providerSchema = z.enum(['systemd_user', 'launch_agent', 'openrc_user', 'openrc_system']);
+const providerSchema = z.enum([
+  'systemd_user',
+  'launch_agent',
+  'openrc_user',
+  'openrc_system',
+  'windows_task',
+]);
 const reconciliationProviderSchema = z.enum([
   'systemd_timer',
   'launch_agent_timer',
   'openrc_supervised_loop',
+  'windows_task_timer',
 ]);
 const packageIdentitySchema = z
   .object({
@@ -216,7 +223,9 @@ const managedDeploymentConfigSchema = z
           ? 'systemd_timer'
           : value.lifecycle.provider === 'launch_agent'
             ? 'launch_agent_timer'
-            : 'openrc_supervised_loop';
+            : value.lifecycle.provider === 'windows_task'
+              ? 'windows_task_timer'
+              : 'openrc_supervised_loop';
       if (value.reconciliation.provider !== expected) {
         context.addIssue({
           code: 'custom',

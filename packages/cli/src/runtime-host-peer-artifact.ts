@@ -23,7 +23,7 @@ import { basename, dirname, join } from 'node:path';
 const PEER_NATIVE_FILE = 'maka_runtime_host_peer.node';
 const SUPPORTED_TARGETS = new Set(['darwin-arm64', 'linux-arm64', 'linux-x64', 'win32-x64']);
 
-export async function resolveRuntimeHostPeerNativePath(cliPath: string): Promise<string> {
+export async function resolveRuntimeHostNativePath(cliPath: string): Promise<string> {
   const packageRoot = dirname(dirname(await realpath(cliPath)));
   const target = runtimeHostPeerTarget();
   const packaged = join(
@@ -50,8 +50,10 @@ export async function resolveRuntimeHostPeerNativePath(cliPath: string): Promise
     if (await isReadable(development)) return realpath(development);
   }
 
-  throw new Error(`Maka does not include a direct-peer native artifact for ${target}`);
+  throw new Error(`Maka does not include a Runtime Host native artifact for ${target}`);
 }
+
+export const resolveRuntimeHostPeerNativePath = resolveRuntimeHostNativePath;
 
 export function runtimeHostPeerTarget(
   platform: NodeJS.Platform = process.platform,

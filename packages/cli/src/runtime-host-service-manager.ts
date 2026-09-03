@@ -154,6 +154,7 @@ export interface RuntimeHostManagedServiceStatus extends RuntimeHostServiceObser
     | 'launch_agent'
     | 'openrc_user'
     | 'openrc_system'
+    | 'windows_task'
     | 'on_demand'
     | 'none';
   readonly config: RuntimeHostManagedServiceConfig | null;
@@ -161,11 +162,20 @@ export interface RuntimeHostManagedServiceStatus extends RuntimeHostServiceObser
   readonly lifecycle?: {
     readonly mode: 'on_demand' | 'supervised';
     readonly availability: 'activation' | 'session' | 'environment' | 'machine';
-    readonly provider?: 'systemd_user' | 'launch_agent' | 'openrc_user' | 'openrc_system';
+    readonly provider?:
+      | 'systemd_user'
+      | 'launch_agent'
+      | 'openrc_user'
+      | 'openrc_system'
+      | 'windows_task';
   };
   readonly reconciliation?: {
     readonly trigger: 'manual' | 'activation' | 'scheduled';
-    readonly provider?: 'systemd_timer' | 'launch_agent_timer' | 'openrc_supervised_loop';
+    readonly provider?:
+      | 'systemd_timer'
+      | 'launch_agent_timer'
+      | 'openrc_supervised_loop'
+      | 'windows_task_timer';
   };
 }
 
